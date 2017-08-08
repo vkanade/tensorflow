@@ -3,7 +3,12 @@
 
 package(default_visibility = ["//tensorflow:internal"])
 
-load("//tensorflow:tensorflow.bzl", "cuda_py_test")
+load(
+    "//tensorflow/tools/test:performance.bzl",
+    "tf_cc_logged_benchmark",
+    "tf_py_logged_benchmark",
+)
+load("//tensorflow:tensorflow.bzl", "py_test")
 
 licenses(["notice"])  # Apache 2.0
 
@@ -16,7 +21,12 @@ py_library(
         "system_info_lib.py",
     ],
     srcs_version = "PY2AND3",
-    deps = ["//tensorflow:tensorflow_py"],
+    deps = [
+        "//tensorflow/core:protos_all_py",
+        "//tensorflow/python:client",
+        "//tensorflow/python:errors",
+        "//tensorflow/python:platform",
+    ],
 )
 
 py_binary(
@@ -25,7 +35,7 @@ py_binary(
     srcs_version = "PY2AND3",
     deps = [
         ":system_info_lib",
-        "//tensorflow:tensorflow_py",
+        "//tensorflow/python:platform",
     ],
 )
 
@@ -37,7 +47,8 @@ py_library(
     srcs_version = "PY2AND3",
     deps = [
         ":system_info_lib",
-        "//tensorflow:tensorflow_py",
+        "//tensorflow/core:protos_all_py",
+        "//tensorflow/python:platform",
     ],
 )
 
@@ -45,9 +56,12 @@ py_binary(
     name = "run_and_gather_logs",
     srcs = ["run_and_gather_logs.py"],
     srcs_version = "PY2AND3",
+    visibility = ["//visibility:public"],
     deps = [
         ":run_and_gather_logs_lib",
-        "//tensorflow:tensorflow_py",
+        "//tensorflow/core:protos_all_py",
+        "//tensorflow/python:client_testlib",
+        "//tensorflow/python:platform",
     ],
 )
 
@@ -69,6 +83,16 @@ py_binary(
 #    main = "run_and_gather_logs.py",
 #)
 
+tf_cc_logged_benchmark(
+    name = "cast_op_benchmark",
+    target = "//tensorflow/core/kernels:cast_op_test_gpu",
+)
+
+tf_py_logged_benchmark(
+    name = "rnn_op_benchmark",
+    target = "//tensorflow/python/kernel_tests:rnn_test",
+)
+
 filegroup(
     name = "all_files",
     srcs = glob(
@@ -79,4 +103,13 @@ filegroup(
         ],
     ),
     visibility = ["//tensorflow:__subpackages__"],
+)
+
+py_test(
+    name = "check_futures_test",
+    size = "small",
+    srcs = ["check_futures_test.py"],
+    data = ["//tensorflow:all_opensource_files"],
+    srcs_version = "PY2AND3",
+    deps = ["@six_archive//:six"],
 )

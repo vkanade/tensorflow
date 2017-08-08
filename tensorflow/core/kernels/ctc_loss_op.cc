@@ -1,4 +1,4 @@
-/* Copyright 2016 Google Inc. All Rights Reserved.
+/* Copyright 2016 The TensorFlow Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,12 +15,13 @@ limitations under the License.
 
 // See docs in ../ops/ctc_ops.cc.
 
-#include "tensorflow/core/util/ctc/ctc_loss_calculator.h"
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/types.h"
+#include "tensorflow/core/kernels/bounds_check.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/macros.h"
+#include "tensorflow/core/util/ctc/ctc_loss_calculator.h"
 #include "tensorflow/core/util/sparse/sparse_tensor.h"
 
 namespace tensorflow {
@@ -41,6 +42,8 @@ class CTCLossOp : public OpKernel {
                                      &preprocess_collapse_repeated_));
     OP_REQUIRES_OK(ctx,
                    ctx->GetAttr("ctc_merge_repeated", &ctc_merge_repeated_));
+    OP_REQUIRES_OK(ctx, ctx->GetAttr("ignore_longer_outputs_than_inputs",
+                                     &ignore_longer_outputs_than_inputs_));
   }
 
   void Compute(OpKernelContext* ctx) override {
@@ -65,7 +68,11 @@ class CTCLossOp : public OpKernel {
     const TensorShape& inputs_shape = inputs->shape();
     const int64 max_time = inputs_shape.dim_size(0);
     const int64 batch_size = inputs_shape.dim_size(1);
-    const int64 num_classes = inputs_shape.dim_size(2);
+    const int64 num_classes_raw = inputs_shape.dim_size(2);
+    OP_REQUIRES(
+        ctx, FastBoundsCheck(num_classes_raw, std::numeric_limits<int>::max()),
+        errors::InvalidArgument("num_classes cannot exceed max int"));
+    const int num_classes = static_cast<const int>(num_classes_raw);
 
     OP_REQUIRES(
         ctx, batch_size == seq_len->dim_size(0),
@@ -81,6 +88,9 @@ class CTCLossOp : public OpKernel {
                     labels_indices->shape().DebugString(), " vs. ",
                     labels_values->shape().DebugString()));
 
+    OP_REQUIRES(ctx, batch_size != 0,
+                errors::InvalidArgument("batch_size must not be 0"));
+
     TensorShape labels_shape({batch_size, max_time});
     std::vector<int64> order{0, 1};
     sparse::SparseTensor labels_sp(*labels_indices, *labels_values,
@@ -93,8 +103,8 @@ class CTCLossOp : public OpKernel {
 
     ctc::CTCLossCalculator::LabelSequences labels_t(batch_size);
     for (const auto& g : labels_sp.group({0})) {  // iterate by batch
-      const int batch_indices = g.group()[0];
-      OP_REQUIRES(ctx, batch_indices >= 0 && batch_indices < batch_size,
+      const int64 batch_indices = g.group()[0];
+      OP_REQUIRES(ctx, FastBoundsCheck(batch_indices, batch_size),
                   errors::InvalidArgument("labels batch index must be between ",
                                           0, " and ", batch_size, " but saw: ",
                                           batch_indices));
@@ -140,15 +150,20 @@ class CTCLossOp : public OpKernel {
 
     // Assumption: the blank index is num_classes - 1
     ctc::CTCLossCalculator ctc_loss_calculator(num_classes - 1, 0);
+    DeviceBase::CpuWorkerThreads workers =
+        *ctx->device()->tensorflow_cpu_worker_threads();
     OP_REQUIRES_OK(ctx, ctc_loss_calculator.CalculateLoss(
                             seq_len_t, labels_t, input_list_t,
                             preprocess_collapse_repeated_, ctc_merge_repeated_,
-                            &loss_t, &gradient_list_t));
+                            ignore_longer_outputs_than_inputs_, &loss_t,
+                            &gradient_list_t, &workers));
   }
 
  private:
   bool preprocess_collapse_repeated_;
   bool ctc_merge_repeated_;
+  bool ignore_longer_outputs_than_inputs_;
+
   TF_DISALLOW_COPY_AND_ASSIGN(CTCLossOp);
 };
 

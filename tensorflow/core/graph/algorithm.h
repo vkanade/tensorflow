@@ -1,4 +1,4 @@
-/* Copyright 2015 Google Inc. All Rights Reserved.
+/* Copyright 2015 The TensorFlow Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,20 +21,28 @@ limitations under the License.
 #include <vector>
 
 #include "tensorflow/core/graph/graph.h"
+#include "tensorflow/core/lib/gtl/array_slice.h"
 
 namespace tensorflow {
 
 // Perform a depth-first-search on g starting at the source node.
 // If enter is not empty, calls enter(n) before visiting any children of n.
 // If leave is not empty, calls leave(n) after visiting all children of n.
-extern void DFS(const Graph& g, std::function<void(Node*)> enter,
-                std::function<void(Node*)> leave);
+extern void DFS(const Graph& g, const std::function<void(Node*)>& enter,
+                const std::function<void(Node*)>& leave);
 
 // Perform a reverse depth-first-search on g starting at the sink node.
 // If enter is not empty, calls enter(n) before visiting any parents of n.
 // If leave is not empty, calls leave(n) after visiting all parents of n.
-extern void ReverseDFS(const Graph& g, std::function<void(Node*)> enter,
-                       std::function<void(Node*)> leave);
+extern void ReverseDFS(const Graph& g, const std::function<void(Node*)>& enter,
+                       const std::function<void(Node*)>& leave);
+
+// Perform a reverse depth-first-search on g starting at the 'start' nodes.
+// If enter is not empty, calls enter(n) before visiting any parents of n.
+// If leave is not empty, calls leave(n) after visiting all parents of n.
+extern void ReverseDFSFrom(const Graph& g, gtl::ArraySlice<Node*> start,
+                           const std::function<void(Node*)>& enter,
+                           const std::function<void(Node*)>& leave);
 
 // Stores in *order the post-order numbering of all nodes
 // in graph found via a depth first search starting at the source node.
@@ -49,9 +57,10 @@ void GetPostOrder(const Graph& g, std::vector<Node*>* order);
 void GetReversePostOrder(const Graph& g, std::vector<Node*>* order);
 
 // Prune nodes in "g" that are not in some path from the source node
-// to any node in 'nodes'.
-void PruneForReverseReachability(Graph* g,
-                                 const std::unordered_set<const Node*>& nodes);
+// to any node in 'nodes'. Returns true if changes were made to the graph.
+// Does not fix up source and sink edges.
+bool PruneForReverseReachability(Graph* g,
+                                 std::unordered_set<const Node*> nodes);
 
 // Connect all nodes with no incoming edges to source.
 // Connect all nodes with no outgoing edges to sink.

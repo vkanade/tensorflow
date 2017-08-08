@@ -1,4 +1,4 @@
-/* Copyright 2016 Google Inc. All Rights Reserved.
+/* Copyright 2016 The TensorFlow Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -73,6 +73,24 @@ TEST_F(ScannerTest, AnySpace) {
   EXPECT_EQ("b ", remaining.ToString());
 }
 
+TEST_F(ScannerTest, AnyEscapedNewline) {
+  StringPiece remaining, match;
+  EXPECT_TRUE(Scanner("\\\n")
+                  .Any(Scanner::LETTER_DIGIT_UNDERSCORE)
+                  .GetResult(&remaining, &match));
+  EXPECT_EQ("\\\n", remaining);
+  EXPECT_EQ("", match);
+}
+
+TEST_F(ScannerTest, AnyEmptyString) {
+  StringPiece remaining, match;
+  EXPECT_TRUE(Scanner("")
+                  .Any(Scanner::LETTER_DIGIT_UNDERSCORE)
+                  .GetResult(&remaining, &match));
+  EXPECT_EQ("", remaining);
+  EXPECT_EQ("", match);
+}
+
 TEST_F(ScannerTest, Eos) {
   EXPECT_FALSE(Scanner("a").Eos().GetResult());
   EXPECT_TRUE(Scanner("").Eos().GetResult());
@@ -116,6 +134,33 @@ TEST_F(ScannerTest, One) {
 TEST_F(ScannerTest, OneLiteral) {
   EXPECT_FALSE(Scanner("abc").OneLiteral("abC").GetResult());
   EXPECT_TRUE(Scanner("abc").OneLiteral("ab").OneLiteral("c").GetResult());
+}
+
+TEST_F(ScannerTest, ScanUntil) {
+  StringPiece remaining, match;
+  EXPECT_TRUE(Scanner(R"(' \1 \2 \3 \' \\'rest)")
+                  .OneLiteral("'")
+                  .ScanUntil('\'')
+                  .OneLiteral("'")
+                  .GetResult(&remaining, &match));
+  EXPECT_EQ(R"( \\'rest)", remaining.ToString());
+  EXPECT_EQ(R"(' \1 \2 \3 \')", match.ToString());
+
+  // The "scan until" character is not present.
+  remaining = match = "unset";
+  EXPECT_FALSE(Scanner(R"(' \1 \2 \3 \\rest)")
+                   .OneLiteral("'")
+                   .ScanUntil('\'')
+                   .GetResult(&remaining, &match));
+  EXPECT_EQ("unset", remaining.ToString());
+  EXPECT_EQ("unset", match.ToString());
+
+  // Scan until an escape character.
+  remaining = match = "";
+  EXPECT_TRUE(
+      Scanner(R"(123\456)").ScanUntil('\\').GetResult(&remaining, &match));
+  EXPECT_EQ(R"(\456)", remaining.ToString());
+  EXPECT_EQ("123", match.ToString());
 }
 
 TEST_F(ScannerTest, ScanEscapedUntil) {
@@ -181,6 +226,13 @@ TEST_F(ScannerTest, CaptureAndGetResult) {
   EXPECT_TRUE(scan.GetResult(&remaining, &match));
   EXPECT_EQ("second", remaining.ToString());
   EXPECT_EQ("first", match.ToString());
+
+  scan.RestartCapture().One(Scanner::LETTER).One(Scanner::LETTER);
+  remaining = "";
+  match = "";
+  EXPECT_TRUE(scan.GetResult(&remaining, &match));
+  EXPECT_EQ("cond", remaining.ToString());
+  EXPECT_EQ("se", match.ToString());
 }
 
 // Tests that if StopCapture is not called, then calling GetResult, then
@@ -224,11 +276,16 @@ TEST_F(ScannerTest, DefaultCapturesAll) {
 }
 
 TEST_F(ScannerTest, AllCharClasses) {
+  EXPECT_EQ(256, ClassStr(Scanner::ALL).size());
   EXPECT_EQ("0123456789", ClassStr(Scanner::DIGIT));
   EXPECT_EQ("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
             ClassStr(Scanner::LETTER));
   EXPECT_EQ("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
             ClassStr(Scanner::LETTER_DIGIT));
+  EXPECT_EQ(
+      "-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_"
+      "abcdefghijklmnopqrstuvwxyz",
+      ClassStr(Scanner::LETTER_DIGIT_DASH_UNDERSCORE));
   EXPECT_EQ(
       "-./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
       "abcdefghijklmnopqrstuvwxyz",
@@ -239,6 +296,8 @@ TEST_F(ScannerTest, AllCharClasses) {
       ClassStr(Scanner::LETTER_DIGIT_DASH_DOT_SLASH_UNDERSCORE));
   EXPECT_EQ(".0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
             ClassStr(Scanner::LETTER_DIGIT_DOT));
+  EXPECT_EQ("+-.0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
+            ClassStr(Scanner::LETTER_DIGIT_DOT_PLUS_MINUS));
   EXPECT_EQ(".0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz",
             ClassStr(Scanner::LETTER_DIGIT_DOT_UNDERSCORE));
   EXPECT_EQ("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz",

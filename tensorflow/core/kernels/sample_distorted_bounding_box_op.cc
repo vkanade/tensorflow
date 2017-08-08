@@ -1,4 +1,4 @@
-/* Copyright 2015 Google Inc. All Rights Reserved.
+/* Copyright 2015 The TensorFlow Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,11 +18,13 @@ limitations under the License.
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/types.h"
+#include "tensorflow/core/kernels/bounds_check.h"
 #include "tensorflow/core/lib/random/simple_philox.h"
 #include "tensorflow/core/util/guarded_philox_random.h"
 
 using tensorflow::random::SimplePhilox;
 
+namespace tensorflow {
 namespace {
 
 // A simple Rectangle class that supplies intersection.
@@ -120,8 +122,8 @@ bool GenerateRandomCrop(int original_width, int original_height,
   const float max_area =
       max_relative_crop_area * original_width * original_height;
 
-  int height = lrintf(sqrt(min_area / aspect_ratio));
-  int max_height = lrintf(sqrt(max_area / aspect_ratio));
+  int height = static_cast<int>(lrintf(sqrt(min_area / aspect_ratio)));
+  int max_height = static_cast<int>(lrintf(sqrt(max_area / aspect_ratio)));
 
   if (lrintf(max_height * aspect_ratio) > original_width) {
     // We must find the smallest max_height satisfying
@@ -143,7 +145,7 @@ bool GenerateRandomCrop(int original_width, int original_height,
     // [0, max_height - height].
     height += random->Uniform(max_height - height + 1);
   }
-  int width = lrintf(height * aspect_ratio);
+  int width = static_cast<int>(lrintf(height * aspect_ratio));
   DCHECK_LE(width, original_width);
 
   // Let us not fail if rounding error causes the area to be
@@ -152,7 +154,7 @@ bool GenerateRandomCrop(int original_width, int original_height,
   float area = static_cast<float>(width * height);
   if (area < min_area) {
     height += 1;
-    width = lrintf(height * aspect_ratio);
+    width = static_cast<int>(lrintf(height * aspect_ratio));
     area = width * height;
   }
 
@@ -161,7 +163,7 @@ bool GenerateRandomCrop(int original_width, int original_height,
   // Try first with a slightly smaller rectangle first.
   if (area > max_area) {
     height -= 1;
-    width = lrintf(height * aspect_ratio);
+    width = static_cast<int>(lrintf(height * aspect_ratio));
     area = width * height;
   }
 
@@ -189,20 +191,21 @@ bool GenerateRandomCrop(int original_width, int original_height,
 }
 }  // namespace
 
-namespace tensorflow {
 template <typename T>
-class SampleDistortedBoundingBoxOp : public OpKernel {
+class SampleDistortedBoundingBoxV2Op : public OpKernel {
  public:
-  explicit SampleDistortedBoundingBoxOp(OpKernelConstruction* context)
+  explicit SampleDistortedBoundingBoxV2Op(OpKernelConstruction* context)
       : OpKernel(context) {
     OP_REQUIRES_OK(context, generator_.Init(context));
 
-    OP_REQUIRES_OK(
-        context, context->GetAttr("min_object_covered", &min_object_covered_));
-    OP_REQUIRES(
-        context, min_object_covered_ > 0,
-        errors::InvalidArgument("Min object covered must be non-negative: ",
-                                min_object_covered_));
+    if (context->num_inputs() == 2) {
+      OP_REQUIRES_OK(context, context->GetAttr("min_object_covered",
+                                               &min_object_covered_));
+      OP_REQUIRES(
+          context, min_object_covered_ >= 0,
+          errors::InvalidArgument("Min object covered must be non-negative: ",
+                                  min_object_covered_));
+    }
 
     OP_REQUIRES_OK(context, context->GetAttr("use_image_if_no_bounding_boxes",
                                              &use_image_if_no_bounding_boxes_));
@@ -247,14 +250,20 @@ class SampleDistortedBoundingBoxOp : public OpKernel {
                 errors::InvalidArgument("image_size must be 1-dimensional",
                                         image_size.shape().DebugString()));
     OP_REQUIRES(context, image_size.dim_size(0) == 3,
-                errors::InvalidArgument("image_size must be 3-dimensional",
+                errors::InvalidArgument("image_size must contain 3 elements",
                                         image_size.shape().DebugString()));
 
     // Note image_size_data(2) is the depth and unused.
-    typename TTypes<T, 1>::ConstTensor image_size_data =
-        image_size.tensor<T, 1>();
-    const int32 height = image_size_data(0);
-    const int32 width = image_size_data(1);
+    const uint64 height_raw = internal::SubtleMustCopy(image_size.flat<T>()(0));
+    const uint64 width_raw = internal::SubtleMustCopy(image_size.flat<T>()(1));
+    OP_REQUIRES(context,
+                FastBoundsCheck(height_raw, std::numeric_limits<int32>::max()),
+                errors::InvalidArgument("image height cannot be >= int32 max"));
+    OP_REQUIRES(context,
+                FastBoundsCheck(width_raw, std::numeric_limits<int32>::max()),
+                errors::InvalidArgument("image width cannot be >= int32 max"));
+    const int32 height = static_cast<int32>(height_raw);
+    const int32 width = static_cast<int32>(width_raw);
 
     // Ensure that the supplied bounding boxes are sane and convert them to
     // Rectangles.
@@ -267,6 +276,25 @@ class SampleDistortedBoundingBoxOp : public OpKernel {
                 errors::InvalidArgument(
                     "bounding boxes must have shape [4] or [*, 4], got ",
                     input_boxes.shape().DebugString()));
+
+    float min_object_covered_val = 0.0;
+    if (context->num_inputs() == 3) {
+      const Tensor& min_object_covered = context->input(2);
+
+      OP_REQUIRES(
+          context, TensorShapeUtils::IsScalar(min_object_covered.shape()),
+          errors::InvalidArgument("min_object_covered must be 0-D, got shape ",
+                                  min_object_covered.shape().DebugString()));
+
+      min_object_covered_val = min_object_covered.scalar<float>()();
+
+      OP_REQUIRES(
+          context, min_object_covered_val >= 0,
+          errors::InvalidArgument("Min object covered must be non-negative: ",
+                                  min_object_covered_val));
+    } else {
+      min_object_covered_val = min_object_covered_;
+    }
 
     std::vector<Rectangle> bounding_boxes;
     if (input_boxes.NumElements() > 0) {
@@ -291,7 +319,7 @@ class SampleDistortedBoundingBoxOp : public OpKernel {
 
     // Insert the entire image if no bounding boxes are supplied.
     const Rectangle image_rect(0, 0, width, height);
-    if (bounding_boxes.size() < 1) {
+    if (bounding_boxes.empty()) {
       OP_REQUIRES(context, use_image_if_no_bounding_boxes_,
                   errors::InvalidArgument(
                       "No bounding boxes provided as input. One must "
@@ -318,7 +346,7 @@ class SampleDistortedBoundingBoxOp : public OpKernel {
 
       if (GenerateRandomCrop(width, height, min_sample_area, max_sample_area,
                              sample_aspect_ratio, &random, &crop_rect)) {
-        if (SatisfiesOverlapConstraints(crop_rect, min_object_covered_,
+        if (SatisfiesOverlapConstraints(crop_rect, min_object_covered_val,
                                         bounding_boxes)) {
           sample_generated = true;
           break;
@@ -363,11 +391,11 @@ class SampleDistortedBoundingBoxOp : public OpKernel {
     typename TTypes<T, 1>::Tensor size_data = size->tensor<T, 1>();
     typename TTypes<float, 3>::Tensor bboxes_data = bboxes->tensor<float, 3>();
 
-    begin_data(0) = offset_height;
-    size_data(0) = target_height;
+    begin_data(0) = T(offset_height);
+    size_data(0) = T(target_height);
 
-    begin_data(1) = offset_width;
-    size_data(1) = target_width;
+    begin_data(1) = T(offset_width);
+    size_data(1) = T(target_width);
 
     bboxes_data(0, 0, 0) =
         static_cast<float>(crop_rect.min_y_) / static_cast<float>(height);
@@ -379,8 +407,8 @@ class SampleDistortedBoundingBoxOp : public OpKernel {
         static_cast<float>(crop_rect.max_x_) / static_cast<float>(width);
 
     // Retain all of the channels.
-    begin_data(2) = 0;
-    size_data(2) = -1;
+    begin_data(2) = T(0);
+    size_data(2) = T(-1);
   }
 
  private:
@@ -392,13 +420,17 @@ class SampleDistortedBoundingBoxOp : public OpKernel {
   bool use_image_if_no_bounding_boxes_;
 };
 
-#define REGISTER_KERNELS(type)                               \
-  REGISTER_KERNEL_BUILDER(                                   \
-      Name("SampleDistortedBoundingBox").Device(DEVICE_CPU)   \
-           .TypeConstraint<type>("T"),                       \
-      SampleDistortedBoundingBoxOp<type>)
+#define REGISTER_KERNELS(type)                                  \
+  REGISTER_KERNEL_BUILDER(Name("SampleDistortedBoundingBox")    \
+                              .Device(DEVICE_CPU)               \
+                              .TypeConstraint<type>("T"),       \
+                          SampleDistortedBoundingBoxV2Op<type>) \
+  REGISTER_KERNEL_BUILDER(Name("SampleDistortedBoundingBoxV2")  \
+                              .Device(DEVICE_CPU)               \
+                              .TypeConstraint<type>("T"),       \
+                          SampleDistortedBoundingBoxV2Op<type>)
 
-TF_CALL_REAL_NUMBER_TYPES(REGISTER_KERNELS);
+TF_CALL_INTEGRAL_TYPES(REGISTER_KERNELS);
 #undef REGISTER_KERNELS
 
 }  // namespace tensorflow
